@@ -10,7 +10,7 @@
 - 进入 Insert / Replace / Terminal 模式时，恢复进入 Normal 之前保存的输入模式。
 - 退出 Neovim（`VimLeavePre`）时恢复输入模式，避免输入法停留在英文状态。
 - 切换只依赖 `gsettings`，不需要重启 IBus 或输入法；自动识别码表时额外调用一次 `ibus engine`。
-- 同步调用，无后台进程或定时器。
+- 命令仅在需要切换或恢复时执行；无后台进程、轮询或人为延时。
 
 ## 原理
 
@@ -28,7 +28,7 @@ org.freedesktop.ibus.engine.table:/org/freedesktop/ibus/engine/table/<schema>/
 ## 要求
 
 - Linux，运行中的 IBus 与 ibus-table 输入法；
-- Neovim >= 0.7（使用 `ModeChanged`、`nvim_create_augroup`）；
+- 最新版 Neovim（使用 `vim.system()` 与 `ModeChanged`；不再兼容旧版）；
 - `gsettings`、`ibus` 命令可用（一般随 GNOME/IBus 安装）。
 
 ## 安装
