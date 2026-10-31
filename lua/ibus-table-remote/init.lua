@@ -21,15 +21,6 @@ local defaults = {
 
 local config = vim.deepcopy(defaults)
 
-local function sleep(ms)
-  local uv = vim.uv or vim.loop
-  if uv and uv.sleep then
-    uv.sleep(ms)
-  else
-    vim.wait(ms)
-  end
-end
-
 local notified = {}
 
 local function notify(message, level)
@@ -44,6 +35,13 @@ local function notify(message, level)
   vim.notify("ibus-table-remote: " .. message, level or vim.log.levels.WARN)
 end
 
+-- `vim.system()` is available in supported Neovim versions and avoids the
+-- global, mutable `vim.v.shell_error` used by vim.fn.system().
+local function run(command)
+  local result = vim.system(command, { text = true }):wait()
+  return result.code == 0, result.stdout or "", result.stderr or ""
+end
+
 -- Turn the configured schema into a full gsettings schema string.
 -- Accepts "zhengma", "table:zhengma", or a full
 -- "org.freedesktop.ibus.engine.table:/.../zhengma/" string.
@@ -54,8 +52,8 @@ local function resolve_schema()
 
   local schema = config.schema
   if schema == nil or schema == "" then
-    local output = vim.fn.system({ "ibus", "engine" })
-    if vim.v.shell_error ~= 0 then
+    local ok, output = run({ "ibus", "engine" })
+    if not ok then
       return nil
     end
     schema = vim.trim(output):match("^table:(.+)$")
@@ -89,9 +87,9 @@ local function get_mode()
     return nil
   end
 
-  local output = vim.fn.system({ "gsettings", "get", schema, "inputmode" })
-  if vim.v.shell_error ~= 0 then
-    notify("failed to read input mode: " .. vim.trim(output), vim.log.levels.ERROR)
+  local ok, output, error = run({ "gsettings", "get", schema, "inputmode" })
+  if not ok then
+    notify("failed to read input mode: " .. vim.trim(error ~= "" and error or output), vim.log.levels.ERROR)
     return nil
   end
 
@@ -109,9 +107,9 @@ local function set_mode(value)
     return false
   end
 
-  local output = vim.fn.system({ "gsettings", "set", schema, "inputmode", tostring(value) })
-  if vim.v.shell_error ~= 0 then
-    notify("failed to set input mode to " .. value .. ": " .. vim.trim(output), vim.log.levels.ERROR)
+  local ok, output, error = run({ "gsettings", "set", schema, "inputmode", tostring(value) })
+  if not ok then
+    notify("failed to set input mode to " .. value .. ": " .. vim.trim(error ~= "" and error or output), vim.log.levels.ERROR)
     return false
   end
   return true
@@ -126,6 +124,7 @@ local ascii_modes = {
   s = true,
   S = true,
   ["\19"] = true, -- CTRL-S (blockwise select)
+  o = true,
 }
 
 -- Modes in which the user types text, so ibus-table should be in Table mode.
@@ -162,7 +161,7 @@ local function enter_ascii_mode()
   end
 end
 
-local function leave_ascii_mode(wait_ms)
+local function leave_ascii_mode()
   if not state.active then
     return
   end
@@ -172,17 +171,15 @@ local function leave_ascii_mode(wait_ms)
   state.saved = nil
 
   if saved ~= nil and saved ~= config.direct_mode then
-    -- When quitting right after Esc, the previous gsettings write (Direct)
-    -- may still be in flight. Give it a moment so the restore wins.
-    if wait_ms then
-      sleep(wait_ms)
-    end
     set_mode(saved)
   end
 end
 
-local function on_mode_changed()
-  local new_mode = vim.v.event.new_mode
+local function on_mode_changed(new_mode)
+  new_mode = new_mode or vim.v.event.new_mode
+  if not new_mode then
+    return
+  end
   if is_ascii_mode(new_mode) then
     enter_ascii_mode()
   elseif is_insert_mode(new_mode) then
@@ -190,11 +187,30 @@ local function on_mode_changed()
   end
 end
 
+-- Kept private by convention; useful for testing integrations without having
+-- to synthesize Neovim's read-only ModeChanged event payload.
+M._on_mode_changed = on_mode_changed
+
 --- Configure and enable the plugin.
 --- Idempotent: calling setup() again replaces the previous configuration.
 ---@param opts table|nil
 function M.setup(opts)
-  config = vim.tbl_deep_extend("force", vim.deepcopy(defaults), opts or {})
+  vim.validate({
+    opts = { opts, "table", true },
+  })
+
+  -- A repeated setup() may select another schema. Restore through the old
+  -- configuration before replacing it, so the saved value is not written to
+  -- the newly configured engine.
+  local new_config = vim.tbl_deep_extend("force", vim.deepcopy(defaults), opts or {})
+  vim.validate({
+    schema = { new_config.schema, "string", true },
+    direct_mode = { new_config.direct_mode, "number" },
+    notify = { new_config.notify, "boolean" },
+  })
+
+  leave_ascii_mode()
+  config = new_config
   state.schema = nil
   notified = {}
   M._configured = true
@@ -203,13 +219,15 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd("ModeChanged", {
     group = group,
     pattern = "*",
-    callback = on_mode_changed,
+    callback = function()
+      on_mode_changed()
+    end,
     desc = "ibus-table-remote: switch input mode with Neovim mode",
   })
   vim.api.nvim_create_autocmd("VimLeavePre", {
     group = group,
     callback = function()
-      leave_ascii_mode(30)
+      leave_ascii_mode()
     end,
     desc = "ibus-table-remote: restore input mode before quitting",
   })
